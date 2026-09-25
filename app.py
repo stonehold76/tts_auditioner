@@ -10,6 +10,8 @@ each can be checked for health and started on demand from the UI.
 
 Run:  Kokoro-venv-python app.py  [TTS_DIR]   → http://127.0.0.1:7770
 """
+__version__ = "0.9.0"
+
 import os, sys, glob, json, re, time, tempfile, threading, subprocess, urllib.request
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
@@ -555,5 +557,5 @@ load();
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"TTS Auditioner on http://127.0.0.1:{PORT}  (TTS dir: {TTS_DIR})")
+    print(f"TTS Auditioner {__version__} on http://127.0.0.1:{PORT}  (TTS dir: {TTS_DIR})")
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")

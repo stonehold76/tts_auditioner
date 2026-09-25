@@ -1,5 +1,7 @@
 # TTS Voice Auditioner
 
+**Version 0.9.0**, a release candidate: working and in daily use, on its way to 1.0.
+
 A local, accessible web tool to **browse, hear, shape and export** text-to-speech voices across five
 engines, then hand the chosen voice to any other program (a voice assistant, a game bridge, your own
 scripts) as a small JSON profile.
