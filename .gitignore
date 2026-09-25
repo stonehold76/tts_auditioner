@@ -1,0 +1,7 @@
+# Engine virtualenvs are built by engines/install_*.sh on each machine (gigabytes; never committed).
+engines/*-venv/
+# Exported voice profiles are personal; only the example ships.
+profiles/*.json
+!profiles/example.json
+__pycache__/
+*.pyc

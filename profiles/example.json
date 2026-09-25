@@ -1,0 +1,10 @@
+{
+  "tts_voice_profile": "1",
+  "label": "Example",
+  "engine": "piper",
+  "voice": "en_GB-northern_english_male-medium",
+  "description": null,
+  "speed": 0.85,
+  "pitch": 1.0,
+  "created": "2026-09-24T00:00:00Z"
+}
