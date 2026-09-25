@@ -10,9 +10,9 @@ each can be checked for health and started on demand from the UI.
 
 Run:  Kokoro-venv-python app.py  [TTS_DIR]   → http://127.0.0.1:7770
 """
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
-import os, sys, glob, json, re, time, tempfile, threading, subprocess, urllib.request
+import os, sys, glob, json, re, time, signal, tempfile, threading, subprocess, urllib.request
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
@@ -33,7 +33,12 @@ PARLER_PY = os.path.join(ENGINES_DIR, "parler-venv/bin/python")
 PARLER_SERVICE = os.path.join(ENGINES_DIR, "parler_service.py")
 PORT = int(os.environ.get("TTS_AUDITIONER_PORT", "7770"))
 PROFILES_DIR = env("TTS_AUDITIONER_PROFILES", os.path.join(APP_DIR, "profiles"))
+# Engine server logs and pid files (the pid files let the Stop button find a server this app
+# started, even after the app itself restarts).
+STATE_DIR = env("TTS_AUDITIONER_STATE",
+                os.path.join(os.environ.get("XDG_STATE_HOME", "~/.local/state"), "tts-auditioner"))
 os.makedirs(PROFILES_DIR, exist_ok=True)
+os.makedirs(STATE_DIR, exist_ok=True)
 
 app = FastAPI()
 _play_lock = threading.Lock()
@@ -56,22 +61,23 @@ SERVERS = {
     "kokoro": {
         "url": "http://localhost:8880", "health": "/v1/audio/voices",
         "cmd": ["bash", "start-cpu.sh"], "cwd": KOKORO_REPO,
-        "log": "/tmp/claude-1000/kokoro-audition.log",
+        "needs": os.path.join(KOKORO_REPO, "start-cpu.sh"),
+        "install": "Kokoro-FastAPI not found at " + KOKORO_REPO + " (set TTS_AUDITIONER_KOKORO_REPO)",
     },
     "melotts": {
         "url": "http://localhost:7771", "health": "/health",
         "cmd": [MELO_PY, MELO_SERVICE], "cwd": ENGINES_DIR,
-        "log": "/tmp/claude-1000/melotts-service.log",
+        "needs": MELO_PY, "install": "not installed — run engines/install_melotts.sh",
     },
     "xtts": {
         "url": "http://localhost:7772", "health": "/health",
         "cmd": [XTTS_PY, XTTS_SERVICE], "cwd": ENGINES_DIR,
-        "log": "/tmp/claude-1000/xtts-service.log",
+        "needs": XTTS_PY, "install": "not installed — run engines/install_xtts.sh",
     },
     "parler": {
         "url": "http://localhost:7773", "health": "/health",
         "cmd": [PARLER_PY, PARLER_SERVICE], "cwd": ENGINES_DIR,
-        "log": "/tmp/claude-1000/parler-service.log",
+        "needs": PARLER_PY, "install": "not installed — run engines/install_parler.sh",
     },
 }
 
@@ -85,16 +91,57 @@ def server_up(key):
         return False
 
 
+def installed(key):
+    return os.path.exists(SERVERS[key]["needs"])
+
+def _pidfile(key):
+    return os.path.join(STATE_DIR, key + ".pid")
+
+_procs = {}  # key -> Popen for servers started by this run, so a stopped one can be reaped
+
+def started_pid(key):
+    """PID of a server this app started and that is still running, else None. A server started some
+    other way (e.g. a Kokoro another program relies on) has no pid file, so it is never stopped. The
+    command line must still match, so a stale pid file (say, after a reboot) can't hit another program."""
+    try:
+        pid = int(open(_pidfile(key)).read().strip())
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            argv = f.read().decode(errors="replace").split("\0")
+    except (OSError, ValueError):
+        return None
+    return pid if argv[:len(SERVERS[key]["cmd"])] == SERVERS[key]["cmd"] else None
+
 def start_server(key):
     s = SERVERS[key]
     if server_up(key):
         return {"ok": True, "msg": "already running"}
+    if not installed(key):
+        return {"ok": False, "msg": s["install"]}
     try:
-        logf = open(s["log"], "ab")
-        subprocess.Popen(s["cmd"], cwd=s["cwd"], stdout=logf, stderr=logf, start_new_session=True)
+        logf = open(os.path.join(STATE_DIR, key + ".log"), "ab")
+        p = subprocess.Popen(s["cmd"], cwd=s["cwd"], stdout=logf, stderr=logf, start_new_session=True)
+        _procs[key] = p
+        with open(_pidfile(key), "w") as f:
+            f.write(str(p.pid))
         return {"ok": True, "msg": "starting"}
     except Exception as e:
         return {"ok": False, "msg": str(e)[:300]}
+
+def stop_server(key):
+    pid = started_pid(key)
+    if not pid:
+        return {"ok": False, "msg": "not started from here, so not stopping it"}
+    try:
+        os.killpg(pid, signal.SIGTERM)  # its own session: takes any child processes with it
+    except OSError as e:
+        return {"ok": False, "msg": str(e)[:300]}
+    try: os.remove(_pidfile(key))
+    except OSError: pass
+    p = _procs.pop(key, None)
+    if p:
+        try: p.wait(timeout=10)
+        except subprocess.TimeoutExpired: os.killpg(pid, signal.SIGKILL)
+    return {"ok": True, "msg": "stopped"}
 
 
 # ---------- voice discovery ----------
@@ -116,8 +163,13 @@ def piper_voices():
     return out
 
 def kokoro_voices():
-    return sorted(os.path.splitext(os.path.basename(p))[0]
-                  for p in glob.glob(os.path.join(TTS_DIR, "kokoro", "voices", "v1_0", "*.pt")))
+    # Voices in the models directory win; otherwise use the ones Kokoro-FastAPI ships with.
+    for d in (os.path.join(TTS_DIR, "kokoro", "voices", "v1_0"),
+              os.path.join(KOKORO_REPO, "api", "src", "voices", "v1_0")):
+        found = glob.glob(os.path.join(d, "*.pt"))
+        if found:
+            return sorted(os.path.splitext(os.path.basename(p))[0] for p in found)
+    return []
 
 def melotts_voices():
     if server_up("melotts"):
@@ -143,29 +195,35 @@ def present(sub):
     return os.path.isdir(p) and any(os.scandir(p))
 
 
+def served(key, name, voices, offline_note, **extra):
+    """One engine that runs as a server: playable when up, Start when installed but down,
+    an install hint when its venv (or repo) is missing, Stop when this app started it."""
+    up = server_up(key)
+    if up:
+        note, start = "", None
+    elif installed(key):
+        note, start = offline_note, key
+    else:
+        note, start = SERVERS[key]["install"], None
+    return {"key": key, "name": name, "voices": voices, "playable": up, "note": note, "start": start,
+            "stop": key if up and started_pid(key) else None, **extra}
+
 def state():
-    ku, mu = server_up("kokoro"), server_up("melotts")
+    piper_ok = os.path.exists(PIPER_PY)
     engines = [
-        {"key": "piper", "name": "Piper", "voices": piper_voices(), "playable": True, "note": "", "start": None},
-        {"key": "kokoro", "name": "Kokoro-82M", "voices": kokoro_voices(), "playable": ku,
-         "note": "" if ku else "server offline — start it to hear these 68 voices",
-         "start": None if ku else "kokoro"},
+        {"key": "piper", "name": "Piper", "voices": piper_voices(), "playable": piper_ok, "start": None,
+         "note": "" if piper_ok else "Piper not found at " + PIPER_PY + " (set TTS_AUDITIONER_PIPER_PY)"},
+        served("kokoro", "Kokoro-82M", kokoro_voices(), "server offline — start it to hear these voices"),
     ]
     if present("melotts"):
-        engines.append({"key": "melotts", "name": "MeloTTS", "voices": melotts_voices(), "playable": mu,
-                        "note": "" if mu else "server offline — start it to hear this voice",
-                        "start": None if mu else "melotts"})
-    if present("xtts-v2_DO-NOT-PUBLISH"):
-        xu = server_up("xtts")
-        engines.append({"key": "xtts", "name": "XTTS-v2 (speakers-only)", "voices": xtts_voices(), "playable": xu,
-                        "note": "" if xu else "server offline — start it to load the built-in speakers (XTTS is slow on CPU)",
-                        "start": None if xu else "xtts"})
+        engines.append(served("melotts", "MeloTTS", melotts_voices(),
+                              "server offline — start it to hear this voice"))
+    if present("xtts-v2"):
+        engines.append(served("xtts", "XTTS-v2 (speakers-only)", xtts_voices(),
+                              "server offline — start it to load the built-in speakers (XTTS is slow on CPU)"))
     if present("parler-tts-mini"):
-        pu = server_up("parler")
-        engines.append({"key": "parler", "name": "Parler-TTS Mini", "voices": [], "playable": pu,
-                        "kind": "describe",
-                        "note": "" if pu else "server offline — start it, then describe a voice (slow on CPU)",
-                        "start": None if pu else "parler"})
+        engines.append(served("parler", "Parler-TTS Mini", [],
+                              "server offline — start it, then describe a voice (slow on CPU)", kind="describe"))
     return {"tts_dir": TTS_DIR, "engines": engines}
 
 
@@ -212,7 +270,8 @@ def apply_pitch(src_wav, pitch):
     Returns a new wav path, or the original if pitch≈1.0 or the shift fails."""
     if abs(pitch - 1.0) < 1e-3:
         return src_wav
-    out = tempfile.mktemp(suffix=".wav", dir="/tmp/claude-1000")
+    fd, out = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     p = subprocess.run(["ffmpeg", "-y", "-i", src_wav, "-af",
                         f"rubberband=pitch={pitch:.3f}:formant=preserved",
                         "-c:a", "pcm_s16le", out],
@@ -238,6 +297,12 @@ def api_server_start(key: str):
         return JSONResponse({"ok": False, "msg": "unknown server"}, status_code=404)
     return start_server(key)
 
+@app.post("/api/server/stop/{key}")
+def api_server_stop(key: str):
+    if key not in SERVERS:
+        return JSONResponse({"ok": False, "msg": "unknown server"}, status_code=404)
+    return stop_server(key)
+
 @app.post("/api/play")
 async def api_play(request: Request):
     """Synthesize and return WAV bytes so the BROWSER plays it (in the user's session)."""
@@ -260,7 +325,8 @@ async def api_play(request: Request):
         return JSONResponse({"ok": False, "msg": f"{engine} is not playable yet"}, status_code=400)
     if not _play_lock.acquire(blocking=False):
         return JSONResponse({"ok": False, "msg": "still synthesizing the last one — try again"}, status_code=429)
-    wav = tempfile.mktemp(suffix=".wav", dir="/tmp/claude-1000")
+    fd, wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
     shifted = None
     try:
         if engine == "parler":
@@ -445,11 +511,18 @@ async function play(engine, voice, extra){
 
 async function startServer(key, name){
   setStatus("… starting " + name + " server (CPU). First start can take 30–90s to warm up.");
-  await fetch("/api/server/start/" + key, {method:"POST"});
+  const r = await (await fetch("/api/server/start/" + key, {method:"POST"})).json();
+  if(!r.ok){ setStatus("✕ " + name + ": " + r.msg); return; }
   const poll = setInterval(async ()=>{
     const d = await (await fetch("/api/server/status/" + key)).json();
     if(d.up){ clearInterval(poll); setStatus("✓ " + name + " server up — reloading voices."); load(); }
   }, 4000);
+}
+
+async function stopServer(key, name){
+  const r = await (await fetch("/api/server/stop/" + key, {method:"POST"})).json();
+  setStatus(r.ok ? "■ " + name + " server stopped." : "✕ " + name + ": " + r.msg);
+  load();
 }
 
 function render(st){
@@ -466,6 +539,11 @@ function render(st){
       const b=document.createElement("button"); b.className="kbtn";
       b.textContent="▶ Start " + e.name + " server";
       b.onclick=()=>startServer(e.start, e.name); sec.appendChild(b);
+    }
+    if(e.stop){
+      const b=document.createElement("button"); b.className="kbtn";
+      b.textContent="■ Stop " + e.name + " server";
+      b.onclick=()=>stopServer(e.stop, e.name); sec.appendChild(b);
     }
     if(e.kind === "describe" && e.playable){
       const lbl=document.createElement("label"); lbl.setAttribute("for","desc-"+e.key);

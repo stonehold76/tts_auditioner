@@ -50,7 +50,8 @@ class H(BaseHTTPRequestHandler):
         d = json.loads(self.rfile.read(n) or b"{}")
         text = (d.get("text") or "Hello.").strip()
         desc = (d.get("description") or "A clear, neutral voice speaking at a natural pace.").strip()
-        wavp = tempfile.mktemp(suffix=".wav", dir="/tmp/claude-1000")
+        fd, wavp = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         try:
             input_ids = tokenizer(desc, return_tensors="pt").input_ids
             prompt_ids = tokenizer(text, return_tensors="pt").input_ids

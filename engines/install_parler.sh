@@ -3,7 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 echo ">>> creating parler venv (py3.11)"
-uv venv parler-venv --python 3.11
+uv venv parler-venv --python 3.11 --allow-existing
 VP=parler-venv/bin/python
 echo ">>> torch+torchaudio matched CPU pair"
 uv pip install --python "$VP" --index-url https://download.pytorch.org/whl/cpu torch torchaudio

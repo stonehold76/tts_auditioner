@@ -3,7 +3,7 @@
 
 Loads the LOCAL XTTS-v2 checkpoint and exposes ONLY its preset studio speakers.
 By deliberate design it does NOT accept reference audio and has NO voice-cloning path —
-see the DO-NOT-PUBLISH license note in the model dir and the project's consent stance.
+see the model's license (Coqui Public Model License) and the README's no-cloning stance.
 Runs offline (local checkpoint only).
 """
 import os, json, tempfile, wave
@@ -68,7 +68,8 @@ class H(BaseHTTPRequestHandler):
             speed = 1.0
         if not model.speaker_manager or speaker not in model.speaker_manager.speakers:
             self._send(400, "application/json", json.dumps({"error": "unknown built-in speaker"}).encode()); return
-        wavp = tempfile.mktemp(suffix=".wav", dir="/tmp/claude-1000")
+        fd, wavp = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         try:
             gpt, emb = _latents(speaker)
             with torch.no_grad():

@@ -53,7 +53,8 @@ class H(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             speed = 1.0
         sid = spk2id.get(speaker, list(spk2id.values())[0])
-        wav = tempfile.mktemp(suffix=".wav", dir="/tmp/claude-1000")
+        fd, wav = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         try:
             model.tts_to_file(text, sid, wav, speed=speed)
             with open(wav, "rb") as f:
